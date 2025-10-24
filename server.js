@@ -80,6 +80,8 @@ app.post("/run", async (req, res) => {
 
 // 3️⃣ OpenAI Edit + Commit
 if (action === "openai.edit-and-commit") {
+  console.log("🧠 Running openai.edit-and-commit...");
+  
   // Step 1: Fetch current file from GitHub
   const ghFile = await fetch(
     `https://api.github.com/repos/${payload.owner}/${payload.repo}/contents/${payload.path}`,
@@ -88,36 +90,25 @@ if (action === "openai.edit-and-commit") {
   const ghJson = await ghFile.json();
   const original = Buffer.from(ghJson.content, "base64").toString("utf-8");
 
-  // Step 2: Generate updated HTML from OpenAI
-  const prompt = `
-You are an expert HTML editor.
-Take this HTML and ${payload.instruction}.
-Make the change inside <body>, and keep all original tags intact.
-Return only valid HTML — no markdown fences, no commentary.
-
---- HTML START ---
-${original}
---- HTML END ---
-`;
-
+  // Step 2: Ask OpenAI for a motivational quote
+  const prompt = `Give me one short motivational quote about coding or perseverance, no formatting.`;
   const aiResult = await callOpenAI(payload.model, prompt);
-  let newHtml = aiResult.choices?.[0]?.message?.content ?? original;
+  const quote = aiResult.choices?.[0]?.message?.content?.trim() || "Keep pushing code forward!";
 
-  // Clean up any extra markdown formatting that might break commits
-  newHtml = newHtml
-    .replace(/```html/gi, "")
-    .replace(/```/g, "")
-    .trim();
+  console.log("💬 AI quote:", quote);
 
-  // If the AI didn’t modify anything, ensure we still add a motivational line
-  if (newHtml === original) {
+  // Step 3: Inject the quote before </body>
+  let newHtml = original;
+  if (original.includes("</body>")) {
     newHtml = original.replace(
       /<\/body>/i,
-      `<p><em>"Every build is a step closer to brilliance."</em></p>\n</body>`
+      `<p><em>"${quote}"</em></p>\n</body>`
     );
+  } else {
+    newHtml += `<p><em>"${quote}"</em></p>`;
   }
 
-  // Step 3: Commit back to GitHub
+  // Step 4: Commit the updated HTML to GitHub
   const result = await commitToGitHub(
     payload.owner,
     payload.repo,
@@ -130,7 +121,7 @@ ${original}
   res.json({
     ok: true,
     action,
-    result: { ok: true, commitSha: result.commit?.sha ?? null }
+    result: { ok: true, commitSha: result.commit?.sha ?? null, quote }
   });
   return;
 }
