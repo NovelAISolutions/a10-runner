@@ -1,224 +1,146 @@
-// =============================================================
-// 🧠 A10 Runner - Final Stable Server.js (Fully Fixed Version)
-// =============================================================
-
-// Import all required packages
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
+import dotenv from "dotenv";
+import { Octokit } from "@octokit/rest";
 
-// Initialize Express app
+dotenv.config();
 const app = express();
+app.use(bodyParser.json());
+
 const PORT = process.env.PORT || 10000;
 
-// Middleware
-app.use(bodyParser.json({ limit: "5mb" }));
+const octokit = new Octokit({
+  auth: process.env.GITHUB_TOKEN,
+});
 
-// -------------------------------------------------------------
-// 1️⃣ HEALTH CHECK ENDPOINT
-// -------------------------------------------------------------
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// Helper: update GitHub file
+async function updateGitHubFile({ owner, repo, path, branch, message, content }) {
+  const { data: file } = await octokit.repos.getContent({ owner, repo, path, ref: branch });
+  const sha = file.sha;
+
+  await octokit.repos.createOrUpdateFileContents({
+    owner,
+    repo,
+    path,
+    message,
+    content: Buffer.from(content).toString("base64"),
+    sha,
+    branch,
+  });
+
+  return { ok: true };
+}
+
+// ========== ROUTES ==========
+
+// ✅ Health check
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// -------------------------------------------------------------
-// 2️⃣ HELPER: CALL OPENAI CHAT API
-// -------------------------------------------------------------
-async function callOpenAI(model, instruction) {
-  try {
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a helpful assistant that writes short motivational quotes.",
-          },
-          { role: "user", content: instruction },
-        ],
-      }),
-    });
-
-    if (!resp.ok) {
-      const errText = await resp.text();
-      throw new Error(`OpenAI API error: ${errText}`);
-    }
-
-    const data = await resp.json();
-    const text = data.choices?.[0]?.message?.content?.trim();
-    return text || "Keep pushing forward — progress is progress!";
-  } catch (err) {
-    console.error("❌ OpenAI call failed:", err.message);
-    return "Keep going — every small step counts!";
-  }
-}
-
-// -------------------------------------------------------------
-// 3️⃣ HELPER: COMMIT CHANGES TO GITHUB
-// -------------------------------------------------------------
-async function commitToGitHub(owner, repo, path, content, message, branch) {
-  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
-  let sha = null;
-
-  // STEP 1: Try fetching the existing file
-  const getRes = await fetch(`${apiUrl}?ref=${branch}`, {
-    headers: {
-      "Authorization": `Bearer ${process.env.GITHUB_TOKEN}`,
-      "Accept": "application/vnd.github.v3+json",
-    },
-  });
-
-  if (getRes.ok) {
-    const fileData = await getRes.json();
-    sha = fileData.sha; // file exists, reuse SHA
-  } else {
-    console.warn(`⚠️ File not found at ${path}. Creating new file.`);
-  }
-
-  // STEP 2: Ensure valid HTML structure
-  if (!content.includes("<html")) {
-    content = `
-      <!doctype html>
-      <html>
-        <head><meta charset="utf-8"><title>A10</title></head>
-        <body>
-          <h1>Hello from A10 Orchestrator 🎉</h1>
-          <p>Deployed at: ${new Date().toISOString()}</p>
-          <p><em>"${content.replace(/"/g, "&quot;")}"</em></p>
-        </body>
-      </html>
-    `;
-  }
-
-  // STEP 3: Commit file to GitHub
-  const body = {
-    message,
-    content: Buffer.from(content).toString("base64"),
-    branch,
-    sha,
-  };
-
-  const putRes = await fetch(apiUrl, {
-    method: "PUT",
-    headers: {
-      "Authorization": `Bearer ${process.env.GITHUB_TOKEN}`,
-      "Accept": "application/vnd.github.v3+json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!putRes.ok) {
-    const errText = await putRes.text();
-    console.error("❌ GitHub commit failed:", errText);
-    throw new Error(`GitHub commit failed: ${errText}`);
-  }
-
-  const result = await putRes.json();
-  console.log("✅ Commit successful:", result.commit?.sha);
-  return result.commit?.sha;
-}
-
-// -------------------------------------------------------------
-// 4️⃣ MAIN: /run ACTION ENDPOINT
-// -------------------------------------------------------------
+// ✅ Primary runner route
 app.post("/run", async (req, res) => {
   try {
     const { action, payload } = req.body;
 
-    if (!action) {
-      return res.status(400).json({ ok: false, error: "Missing action" });
+    // 1️⃣ OPENAI CHAT
+    if (action === "openai.chat") {
+      const { model, messages } = payload;
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({ model, messages }),
+      });
+      const data = await response.json();
+      return res.json({ ok: true, action, result: data });
     }
 
-    // Handle only one supported action for now
-    if (action === "openai.edit-and-commit") {
-      const {
-        model,
-        instruction,
-        owner,
-        repo,
-        path,
-        branch,
-        message,
-        commit,
-      } = payload;
+    // 2️⃣ OPENAI EDIT + COMMIT
+    else if (action === "openai.edit-and-commit") {
+      const { model, instruction, owner, repo, path, branch, message, commit } = payload;
 
-      // Step 1: Get new quote from OpenAI
-      const quote = await callOpenAI(model, instruction);
-      console.log("✨ Quote generated:", quote);
+      // Get current file content
+      const { data: file } = await octokit.repos.getContent({ owner, repo, path, ref: branch });
+      const currentContent = Buffer.from(file.content, "base64").toString("utf8");
 
-      // Step 2: Fetch the existing file from GitHub
-      const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`;
-      let oldContent = "";
-      const getFileRes = await fetch(fileApiUrl, {
+      // Ask GPT to edit
+      const aiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
         headers: {
-          "Authorization": `Bearer ${process.env.GITHUB_TOKEN}`,
-          "Accept": "application/vnd.github.v3+json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
         },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are a precise code editor. Always output pure HTML only, never explanations.",
+            },
+            {
+              role: "user",
+              content: `${instruction}\n\nCurrent file:\n${currentContent}`,
+            },
+          ],
+        }),
       });
 
-      if (getFileRes.ok) {
-        const fileJson = await getFileRes.json();
-        oldContent = Buffer.from(fileJson.content, "base64").toString("utf8");
-      } else {
-        console.warn("⚠️ File not found — creating a new one from scratch.");
-        oldContent = `
-          <!doctype html>
-          <html>
-            <head><meta charset="utf-8"><title>A10</title></head>
-            <body>
-              <h1>Hello from A10 Orchestrator 🎉</h1>
-              <p>Deployed at: ${new Date().toISOString()}</p>
-            </body>
-          </html>
-        `;
-      }
+      const aiData = await aiResponse.json();
+      const newHtml = aiData.choices?.[0]?.message?.content || currentContent;
 
-      // Step 3: Insert the motivational quote
-      const newContent = oldContent.replace(
-        "</body>",
-        `<p><em>"${quote}"</em></p></body>`
-      );
-
-      // Step 4: Commit the updated file to GitHub
-      let commitSha = null;
       if (commit) {
-        commitSha = await commitToGitHub(
+        const { data: file } = await octokit.repos.getContent({ owner, repo, path, ref: branch });
+        const sha = file.sha;
+
+        await octokit.repos.createOrUpdateFileContents({
           owner,
           repo,
           path,
-          newContent,
           message,
-          branch
-        );
+          content: Buffer.from(newHtml).toString("base64"),
+          sha,
+          branch,
+        });
       }
 
-      // Step 5: Return success response
       return res.json({
         ok: true,
         action,
-        result: { ok: true, commitSha, quote },
+        result: { ok: true, contentPreview: newHtml.slice(0, 200) },
       });
     }
 
-    // Unknown action handler
-    return res.status(400).json({ ok: false, error: `Unknown action: ${action}` });
+    // 3️⃣ DIRECT COMMIT — no GPT involved
+    else if (action === "direct.commit") {
+      const { owner, repo, path, branch, message, commit, content } = payload;
+
+      if (!content) {
+        return res.status(400).json({ ok: false, error: "Missing content for direct.commit" });
+      }
+
+      await updateGitHubFile({ owner, repo, path, branch, message, content });
+      return res.json({
+        ok: true,
+        action,
+        result: { ok: true, committed: true, path },
+      });
+    }
+
+    // 🚫 Unknown action
+    else {
+      return res.status(400).json({ ok: false, error: `Unknown action: ${action}` });
+    }
   } catch (err) {
-    console.error("❌ Runner error:", err.message);
+    console.error("Server error:", err);
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// -------------------------------------------------------------
-// 5️⃣ START SERVER
-// -------------------------------------------------------------
-app.listen(PORT, () => {
-  console.log(`🚀 A10 Runner listening on port ${PORT}`);
-  console.log(`✅ Your service is live at: https://a10-runner.onrender.com`);
-});
+app.listen(PORT, () => console.log(`🚀 A10 Runner listening on port ${PORT}`));
