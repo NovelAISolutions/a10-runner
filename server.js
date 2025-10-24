@@ -1,24 +1,28 @@
-// server.js — A10 Runner (Final Stable Version)
-// ------------------------------------------------
+// server.js — A10 Runner (Final Stable + GitHub API Fix)
+// ------------------------------------------------------
 
-// Import dependencies
+// Imports
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
 
-// Environment setup
+// Constants
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 // Middleware
 app.use(bodyParser.json({ limit: "5mb" }));
 
-// Simple health check
+// ------------------------------------------------------
+// 1️⃣ Health check endpoint
+// ------------------------------------------------------
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// --- Helper: Call OpenAI Chat API ---
+// ------------------------------------------------------
+// 2️⃣ Helper: Call OpenAI Chat API
+// ------------------------------------------------------
 async function callOpenAI(model, instruction) {
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -29,36 +33,40 @@ async function callOpenAI(model, instruction) {
     body: JSON.stringify({
       model,
       messages: [
-        { role: "system", content: "You are a helpful assistant that writes motivational quotes." },
+        { role: "system", content: "You are a helpful assistant that writes short motivational quotes." },
         { role: "user", content: instruction },
       ],
     }),
   });
 
   if (!resp.ok) {
-    const errorText = await resp.text();
-    throw new Error(`OpenAI API failed: ${errorText}`);
+    const errText = await resp.text();
+    throw new Error(`OpenAI API error: ${errText}`);
   }
 
   const data = await resp.json();
-  return data.choices?.[0]?.message?.content?.trim() || "(no result)";
+  const text = data.choices?.[0]?.message?.content?.trim();
+  return text || "Keep pushing forward — progress is progress!";
 }
 
-// --- Helper: Commit to GitHub ---
+// ------------------------------------------------------
+// 3️⃣ Helper: Commit file changes to GitHub
+// ------------------------------------------------------
 async function commitToGitHub(owner, repo, path, content, message, branch) {
   const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
 
-  // Step 1: get file SHA
-  const getRes = await fetch(apiUrl, {
+  // Get existing file SHA
+  const getRes = await fetch(`${apiUrl}?ref=${branch}`, {
     headers: {
       "Authorization": `Bearer ${process.env.GITHUB_TOKEN}`,
       "Accept": "application/vnd.github.v3+json",
     },
   });
+
   const fileData = await getRes.json();
   const sha = fileData.sha;
 
-  // Step 2: prepare new content
+  // Prepare PUT body
   const body = {
     message,
     content: Buffer.from(content).toString("base64"),
@@ -66,7 +74,7 @@ async function commitToGitHub(owner, repo, path, content, message, branch) {
     sha,
   };
 
-  // Step 3: commit update
+  // Commit via GitHub API
   const putRes = await fetch(apiUrl, {
     method: "PUT",
     headers: {
@@ -78,17 +86,19 @@ async function commitToGitHub(owner, repo, path, content, message, branch) {
   });
 
   if (!putRes.ok) {
-    const err = await putRes.text();
-    console.error("❌ GitHub commit failed:", err);
-    throw new Error(err);
+    const errText = await putRes.text();
+    console.error("❌ GitHub commit failed:", errText);
+    throw new Error(`GitHub commit failed: ${errText}`);
   }
 
   const result = await putRes.json();
-  console.log("✅ GitHub commit successful:", result.commit?.sha);
+  console.log("✅ Commit successful:", result.commit?.sha);
   return result.commit?.sha;
 }
 
-// --- Main runner endpoint ---
+// ------------------------------------------------------
+// 4️⃣ Main: /run action handler
+// ------------------------------------------------------
 app.post("/run", async (req, res) => {
   try {
     const { action, payload } = req.body;
@@ -97,6 +107,9 @@ app.post("/run", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Missing action" });
     }
 
+    // ---------------------------
+    // openai.edit-and-commit
+    // ---------------------------
     if (action === "openai.edit-and-commit") {
       const {
         model,
@@ -109,22 +122,34 @@ app.post("/run", async (req, res) => {
         commit,
       } = payload;
 
-      // 1️⃣ Generate quote
+      // 1️⃣ Generate a new motivational quote
       const quote = await callOpenAI(model, instruction);
-      console.log("✨ Generated quote:", quote);
+      console.log("✨ Quote generated:", quote);
 
-      // 2️⃣ Fetch existing file
-      const fileUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`;
-      const resp = await fetch(fileUrl);
-      const oldContent = await resp.text();
+      // 2️⃣ Fetch current file via GitHub API (authenticated)
+      const fileApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`;
+      const getFileRes = await fetch(fileApiUrl, {
+        headers: {
+          "Authorization": `Bearer ${process.env.GITHUB_TOKEN}`,
+          "Accept": "application/vnd.github.v3+json",
+        },
+      });
 
-      // 3️⃣ Inject quote into HTML
+      if (!getFileRes.ok) {
+        const errText = await getFileRes.text();
+        throw new Error(`Failed to fetch file: ${errText}`);
+      }
+
+      const fileJson = await getFileRes.json();
+      const oldContent = Buffer.from(fileJson.content, "base64").toString("utf8");
+
+      // 3️⃣ Insert the new quote before </body>
       const newContent = oldContent.replace(
         "</body>",
         `<p><em>"${quote}"</em></p></body>`
       );
 
-      // 4️⃣ Commit if requested
+      // 4️⃣ Commit the updated file
       let commitSha = null;
       if (commit) {
         commitSha = await commitToGitHub(owner, repo, path, newContent, message, branch);
@@ -137,16 +162,20 @@ app.post("/run", async (req, res) => {
       });
     }
 
+    // ---------------------------
     // Unknown action
+    // ---------------------------
     return res.status(400).json({ ok: false, error: `Unknown action: ${action}` });
   } catch (err) {
-    console.error("❌ Runner error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    console.error("❌ Runner error:", err.message);
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// Start server
+// ------------------------------------------------------
+// 5️⃣ Start server
+// ------------------------------------------------------
 app.listen(PORT, () => {
   console.log(`🚀 A10 Runner listening on port ${PORT}`);
-  console.log(`✅ Your service is live 🎉`);
+  console.log(`✅ Your service is live at: https://a10-runner.onrender.com`);
 });
