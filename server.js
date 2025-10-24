@@ -46,7 +46,7 @@ app.post("/run", async (req, res) => {
   try {
     const { action, payload } = req.body;
 
-    // Action 1: openai.chat
+    // 1️⃣ Basic chat
     if (action === "openai.chat") {
       const result = await callOpenAI(payload.model, payload.prompt);
       return res.json({
@@ -60,7 +60,7 @@ app.post("/run", async (req, res) => {
       });
     }
 
-    // Action 2: github.commit
+    // 2️⃣ Direct commit
     if (action === "github.commit") {
       const result = await commitToGitHub(
         payload.owner,
@@ -73,24 +73,37 @@ app.post("/run", async (req, res) => {
       return res.json({ ok: true, action, result });
     }
 
-    // ✅ NEW: Action 3: openai.edit-and-commit
+    // 3️⃣ ✨ Edit + Commit (improved)
     if (action === "openai.edit-and-commit") {
-      // Step 1: Get the existing file content
+      // Step 1: Get current file from GitHub
       const ghFile = await fetch(
         `https://api.github.com/repos/${payload.owner}/${payload.repo}/contents/${payload.path}`,
-        {
-          headers: { "Authorization": `Bearer ${process.env.GITHUB_TOKEN}` }
-        }
+        { headers: { "Authorization": `Bearer ${process.env.GITHUB_TOKEN}` } }
       );
       const ghJson = await ghFile.json();
       const original = Buffer.from(ghJson.content, "base64").toString("utf-8");
 
-      // Step 2: Ask OpenAI to edit it
-      const prompt = `Here is an HTML file. ${payload.instruction}\n\n---\n\n${original}`;
-      const aiResult = await callOpenAI(payload.model, prompt);
-      const newHtml = aiResult.choices?.[0]?.message?.content ?? original;
+      // Step 2: Ask OpenAI to rewrite only the body, not the whole HTML tag
+      const prompt = `
+You are a precise code editor.
+Take this HTML and ${payload.instruction}.
+Return only valid HTML, no commentary or markdown fences.
 
-      // Step 3: Commit the updated content back
+--- HTML START ---
+${original}
+--- HTML END ---
+`;
+      const aiResult = await callOpenAI(payload.model, prompt);
+
+      // Some models return ```html``` fenced blocks; strip them if present
+      let newHtml = aiResult.choices?.[0]?.message?.content ?? original;
+      newHtml = newHtml
+        .replace(/^```html/i, "")
+        .replace(/^```/i, "")
+        .replace(/```$/i, "")
+        .trim();
+
+      // Step 3: Commit back
       const result = await commitToGitHub(
         payload.owner,
         payload.repo,
@@ -106,6 +119,12 @@ app.post("/run", async (req, res) => {
         result: { ok: true, commitSha: result.commit?.sha ?? null }
       });
     }
+
+    return res.status(400).json({ ok: false, error: "Unknown or missing action", action });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
     // Unknown action
     return res.status(400).json({
