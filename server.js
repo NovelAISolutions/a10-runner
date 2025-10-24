@@ -9,7 +9,7 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// --- Helper functions ---
+// Helper: Call OpenAI
 async function callOpenAI(model, prompt) {
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -25,6 +25,7 @@ async function callOpenAI(model, prompt) {
   return r.json();
 }
 
+// Helper: Commit to GitHub
 async function commitToGitHub(owner, repo, path, content, message, branch = "main") {
   const r = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`, {
     method: "PUT",
@@ -41,15 +42,17 @@ async function commitToGitHub(owner, repo, path, content, message, branch = "mai
   return r.json();
 }
 
-// --- Core /run endpoint ---
+// ===========================
+// Main /run Endpoint
+// ===========================
 app.post("/run", async (req, res) => {
   try {
     const { action, payload } = req.body;
 
-    // 1️⃣ Basic chat
+    // 1️⃣ OpenAI Chat
     if (action === "openai.chat") {
       const result = await callOpenAI(payload.model, payload.prompt);
-      return res.json({
+      res.json({
         ok: true,
         action,
         result: {
@@ -58,9 +61,10 @@ app.post("/run", async (req, res) => {
           text: result.choices?.[0]?.message?.content ?? "(no text)"
         }
       });
+      return;
     }
 
-    // 2️⃣ Direct commit
+    // 2️⃣ GitHub Commit
     if (action === "github.commit") {
       const result = await commitToGitHub(
         payload.owner,
@@ -70,12 +74,13 @@ app.post("/run", async (req, res) => {
         payload.message,
         payload.branch
       );
-      return res.json({ ok: true, action, result });
+      res.json({ ok: true, action, result });
+      return;
     }
 
-    // 3️⃣ ✨ Edit + Commit (improved)
+    // 3️⃣ OpenAI Edit + Commit
     if (action === "openai.edit-and-commit") {
-      // Step 1: Get current file from GitHub
+      // Step 1: Fetch file
       const ghFile = await fetch(
         `https://api.github.com/repos/${payload.owner}/${payload.repo}/contents/${payload.path}`,
         { headers: { "Authorization": `Bearer ${process.env.GITHUB_TOKEN}` } }
@@ -83,19 +88,17 @@ app.post("/run", async (req, res) => {
       const ghJson = await ghFile.json();
       const original = Buffer.from(ghJson.content, "base64").toString("utf-8");
 
-      // Step 2: Ask OpenAI to rewrite only the body, not the whole HTML tag
+      // Step 2: Generate update
       const prompt = `
-You are a precise code editor.
+You are a precise HTML editor.
 Take this HTML and ${payload.instruction}.
-Return only valid HTML, no commentary or markdown fences.
+Return clean valid HTML (no markdown fences).
 
 --- HTML START ---
 ${original}
 --- HTML END ---
 `;
       const aiResult = await callOpenAI(payload.model, prompt);
-
-      // Some models return ```html``` fenced blocks; strip them if present
       let newHtml = aiResult.choices?.[0]?.message?.content ?? original;
       newHtml = newHtml
         .replace(/^```html/i, "")
@@ -103,7 +106,7 @@ ${original}
         .replace(/```$/i, "")
         .trim();
 
-      // Step 3: Commit back
+      // Step 3: Commit update
       const result = await commitToGitHub(
         payload.owner,
         payload.repo,
@@ -113,27 +116,19 @@ ${original}
         payload.branch
       );
 
-      return res.json({
+      res.json({
         ok: true,
         action,
         result: { ok: true, commitSha: result.commit?.sha ?? null }
       });
+      return;
     }
 
-    return res.status(400).json({ ok: false, error: "Unknown or missing action", action });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-    // Unknown action
-    return res.status(400).json({
-      ok: false,
-      error: "Unknown or missing action",
-      action
-    });
+    // 4️⃣ Unknown Action
+    res.status(400).json({ ok: false, error: "Unknown or missing action", action });
 
   } catch (err) {
+    console.error("Runner Error:", err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
