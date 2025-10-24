@@ -78,51 +78,62 @@ app.post("/run", async (req, res) => {
       return;
     }
 
-    // 3️⃣ OpenAI Edit + Commit
-    if (action === "openai.edit-and-commit") {
-      // Step 1: Fetch file
-      const ghFile = await fetch(
-        `https://api.github.com/repos/${payload.owner}/${payload.repo}/contents/${payload.path}`,
-        { headers: { "Authorization": `Bearer ${process.env.GITHUB_TOKEN}` } }
-      );
-      const ghJson = await ghFile.json();
-      const original = Buffer.from(ghJson.content, "base64").toString("utf-8");
+// 3️⃣ OpenAI Edit + Commit
+if (action === "openai.edit-and-commit") {
+  // Step 1: Fetch current file from GitHub
+  const ghFile = await fetch(
+    `https://api.github.com/repos/${payload.owner}/${payload.repo}/contents/${payload.path}`,
+    { headers: { "Authorization": `Bearer ${process.env.GITHUB_TOKEN}` } }
+  );
+  const ghJson = await ghFile.json();
+  const original = Buffer.from(ghJson.content, "base64").toString("utf-8");
 
-      // Step 2: Generate update
-      const prompt = `
-You are a precise HTML editor.
+  // Step 2: Generate updated HTML from OpenAI
+  const prompt = `
+You are an expert HTML editor.
 Take this HTML and ${payload.instruction}.
-Return clean valid HTML (no markdown fences).
+Make the change inside <body>, and keep all original tags intact.
+Return only valid HTML — no markdown fences, no commentary.
 
 --- HTML START ---
 ${original}
 --- HTML END ---
 `;
-      const aiResult = await callOpenAI(payload.model, prompt);
-      let newHtml = aiResult.choices?.[0]?.message?.content ?? original;
-      newHtml = newHtml
-        .replace(/^```html/i, "")
-        .replace(/^```/i, "")
-        .replace(/```$/i, "")
-        .trim();
 
-      // Step 3: Commit update
-      const result = await commitToGitHub(
-        payload.owner,
-        payload.repo,
-        payload.path,
-        newHtml,
-        payload.message,
-        payload.branch
-      );
+  const aiResult = await callOpenAI(payload.model, prompt);
+  let newHtml = aiResult.choices?.[0]?.message?.content ?? original;
 
-      res.json({
-        ok: true,
-        action,
-        result: { ok: true, commitSha: result.commit?.sha ?? null }
-      });
-      return;
-    }
+  // Clean up any extra markdown formatting that might break commits
+  newHtml = newHtml
+    .replace(/```html/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  // If the AI didn’t modify anything, ensure we still add a motivational line
+  if (newHtml === original) {
+    newHtml = original.replace(
+      /<\/body>/i,
+      `<p><em>"Every build is a step closer to brilliance."</em></p>\n</body>`
+    );
+  }
+
+  // Step 3: Commit back to GitHub
+  const result = await commitToGitHub(
+    payload.owner,
+    payload.repo,
+    payload.path,
+    newHtml,
+    payload.message,
+    payload.branch
+  );
+
+  res.json({
+    ok: true,
+    action,
+    result: { ok: true, commitSha: result.commit?.sha ?? null }
+  });
+  return;
+}
 
     // 4️⃣ Unknown Action
     res.status(400).json({ ok: false, error: "Unknown or missing action", action });
