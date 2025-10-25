@@ -1,5 +1,6 @@
 // ================================================
-// A10 Runner — Auto-Chained Orchestrator
+// A10 Runner — Enhanced Smart Coder Agent
+// Now parses styling hints + replaces old banner
 // Architect → Coder → Tester → Quality → Integrator
 // ================================================
 
@@ -78,13 +79,6 @@ async function safeForward(path, payload) {
   }
 }
 
-// ---------- Routes ----------
-app.get("/health", (_req, res) =>
-  res.json({ ok: true, message: "runner is alive", timestamp: new Date().toISOString() })
-);
-
-app.post("/echo", (req, res) => res.json({ received: req.body }));
-
 // ---------- Architect Agent ----------
 app.post("/run/architect", async (req, res) => {
   try {
@@ -115,17 +109,16 @@ app.post("/run/architect", async (req, res) => {
   }
 });
 
-// ---------- Smart Coder Agent (HTML updater) ----------
+// ---------- Smart Coder Agent (Enhanced HTML updater) ----------
 app.post("/run/coder", async (req, res) => {
   try {
     const p = req.body?.payload || req.body || {};
     console.log("🧠 Coder received payload:", JSON.stringify(p, null, 2));
 
-    const owner = p.owner;
-    const repo = p.repo;
+    const { owner, repo } = p;
     const branch = p.branch || "main";
     const path = p.path || "index.html";
-    const message = p.message || "AI Coder Agent update";
+    const message = p.message || "Enhanced Smart Coder update";
     const task = p.task || "";
 
     if (!owner || !repo) {
@@ -137,24 +130,49 @@ app.post("/run/coder", async (req, res) => {
     try {
       const { data } = await octokit.repos.getContent({ owner, repo, path, ref: branch });
       existing = Buffer.from(data.content, "base64").toString("utf8");
-    } catch (err) {
-      console.warn("⚠️ No existing file found, starting fresh.");
+    } catch {
       existing = "<html><body><h1>Initial Page</h1></body></html>";
     }
 
-    // --- 2️⃣ Create a simple addition from the Architect task ---
+    // --- 2️⃣ Parse styling hints from task text ---
+    const style = {};
+    const lower = task.toLowerCase();
+    if (lower.includes("center")) style["text-align"] = "center";
+    if (lower.includes("bold")) style["font-weight"] = "bold";
+    if (lower.includes("blue")) style.color = "blue";
+    if (lower.includes("gold")) style.color = "gold";
+    if (lower.includes("green")) style.color = "green";
+    if (lower.includes("red")) style.color = "red";
+    if (lower.includes("large") || lower.includes("bigger"))
+      style["font-size"] = "22px";
+    if (lower.includes("small"))
+      style["font-size"] = "14px";
+
+    // --- 3️⃣ Convert to inline CSS string ---
+    const styleString = Object.entries(style)
+      .map(([k, v]) => `${k}:${v}`)
+      .join(";");
+
+    // --- 4️⃣ Extract human message ---
+    // We try to isolate the quoted text after “says”
+    let textMatch = task.match(/says['"“](.*?)['"”]/i);
+    const innerText = textMatch ? textMatch[1] : task;
+
     const addition = `
-      <div style="text-align:center;font-weight:bold;color:gold;font-size:22px;margin-top:20px;">
-        ✨ ${task || "Update completed by Coder Agent"}
+      <div class="a10-banner" style="${styleString};margin-top:20px;">
+        ${innerText}
       </div>
     `;
 
-    // --- 3️⃣ Insert the new content before </body> if possible ---
-    const updatedHtml = existing.includes("</body>")
-      ? existing.replace("</body>", `${addition}\n</body>`)
-      : existing + addition;
+    // --- 5️⃣ Remove previous a10-banner (replace old banners) ---
+    let cleanedHtml = existing.replace(/<div class="a10-banner".*?<\/div>/gs, "");
 
-    // --- 4️⃣ Commit back to GitHub ---
+    // --- 6️⃣ Insert the new content before </body> if possible ---
+    const updatedHtml = cleanedHtml.includes("</body>")
+      ? cleanedHtml.replace("</body>", `${addition}\n</body>`)
+      : cleanedHtml + addition;
+
+    // --- 7️⃣ Commit updated HTML ---
     const result = await createOrUpdateFile({
       owner,
       repo,
@@ -164,9 +182,9 @@ app.post("/run/coder", async (req, res) => {
       branch,
     });
 
-    console.log("✅ Smart commit successful:", result);
+    console.log("✅ Enhanced Smart Coder commit successful:", result);
 
-    // --- 5️⃣ Auto-forward to Tester ---
+    // --- 8️⃣ Auto-forward to Tester ---
     const response = {
       ok: true,
       agent: "coder",
@@ -178,7 +196,7 @@ app.post("/run/coder", async (req, res) => {
 
     res.json(response);
   } catch (err) {
-    console.error("💥 Smart Coder error:", err);
+    console.error("💥 Enhanced Smart Coder error:", err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -197,7 +215,6 @@ app.post("/run/tester", async (req, res) => {
       timestamp: new Date().toISOString(),
     };
 
-    // Auto-trigger Quality Agent
     response.forwarded = await safeForward("/run/quality", p);
 
     res.json(response);
@@ -221,7 +238,6 @@ app.post("/run/quality", async (req, res) => {
       timestamp: new Date().toISOString(),
     };
 
-    // Auto-trigger Integrator Agent
     response.forwarded = await safeForward("/run/integrator", p);
 
     res.json(response);
@@ -244,7 +260,6 @@ app.post("/run/integrator", async (req, res) => {
       timestamp: new Date().toISOString(),
     };
 
-    // Optionally trigger Supervisor
     response.forwarded = await safeForward("/run/supervisor", p);
 
     res.json(response);
@@ -260,4 +275,4 @@ app.post("/run/supervisor", (_req, res) =>
 );
 
 // ---------- Start ----------
-app.listen(PORT, () => console.log(`🚀 A10 Runner auto-chain live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 A10 Runner enhanced auto-chain live on port ${PORT}`));
