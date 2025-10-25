@@ -11,8 +11,7 @@ dotenv.config();
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
-
-// ---------- Simple Request Logger ----------
+app.use(bodyParser.urlencoded({ extended: true })); // ✅ handles n8n fallbacks
 app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
