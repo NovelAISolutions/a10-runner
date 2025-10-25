@@ -1,12 +1,13 @@
 // ================================================
 // A10 Runner — Hardened backend for n8n workflow
-// Stable Render-safe version (2025-10-25)
+// Enhanced Architect Agent (2025-10-25)
 // ================================================
 
 import express from "express";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
 import { Octokit } from "@octokit/rest";
+import fetch from "node-fetch"; // ✅ for internal agent chaining
 
 dotenv.config();
 
@@ -25,6 +26,7 @@ app.use((req, _res, next) => {
 // ---------- Environment ----------
 const PORT = process.env.PORT || 10000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const SELF_URL = process.env.SELF_URL || "https://a10-runner.onrender.com";
 
 if (!GITHUB_TOKEN) {
   console.warn("⚠️  GITHUB_TOKEN missing — GitHub commits will fail.");
@@ -62,18 +64,65 @@ async function createOrUpdateFile({ owner, repo, path, message, contentUtf8, bra
 }
 
 // ---------- Routes ----------
+
+// Health
 app.get("/health", (_req, res) => {
   res.json({ ok: true, message: "runner is alive", timestamp: new Date().toISOString() });
 });
 
+// Echo
 app.post("/echo", (req, res) => {
   res.json({ received: req.body });
 });
 
-app.post("/run/architect", async (_req, res) => {
-  res.json({ ok: true, agent: "architect", note: "runner is alive" });
+// ✅ Enhanced Architect Agent
+app.post("/run/architect", async (req, res) => {
+  try {
+    const payload = req.body || {};
+    console.log("📦 Architect Agent received payload:", JSON.stringify(payload, null, 2));
+
+    // Basic validation
+    const required = ["task", "owner", "repo"];
+    const missing = required.filter(k => !payload[k]);
+    if (missing.length) {
+      return res.status(400).json({ ok: false, error: `Missing required fields: ${missing.join(", ")}` });
+    }
+
+    // Build structured response
+    const response = {
+      ok: true,
+      agent: "architect",
+      status: "processed",
+      received: payload,
+      timestamp: new Date().toISOString(),
+      next_step: "coder",
+    };
+
+    console.log("✅ Architect task accepted:", response);
+
+    // Optionally auto-trigger Coder Agent
+    try {
+      const coderUrl = `${SELF_URL}/run/coder`;
+      const coderResponse = await fetch(coderUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload }),
+      });
+      const coderResult = await coderResponse.json();
+      console.log("🧩 Forwarded to Coder Agent:", coderResult);
+      response.forwarded = coderResult;
+    } catch (forwardErr) {
+      console.warn("⚠️ Could not forward to coder:", forwardErr.message);
+    }
+
+    res.json(response);
+  } catch (err) {
+    console.error("💥 Architect error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
+// Coder Agent
 app.post("/run/coder", async (req, res) => {
   try {
     console.log("Incoming coder payload:", JSON.stringify(req.body, null, 2));
@@ -117,10 +166,16 @@ app.post("/run/coder", async (req, res) => {
   }
 });
 
-// ---------- Default Stubs ----------
+// Tester
 app.post("/run/tester", (_req, res) => res.json({ ok: true, tester: "passed" }));
+
+// Quality
 app.post("/run/quality", (_req, res) => res.json({ ok: true, status: "pass" }));
+
+// Integrator
 app.post("/run/integrator", (_req, res) => res.json({ ok: true, integrator: "done" }));
+
+// Supervisor
 app.post("/run/supervisor", (_req, res) => res.json({ ok: true, supervisor: "done" }));
 
 // ---------- Start Server ----------
