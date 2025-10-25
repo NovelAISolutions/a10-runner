@@ -1,7 +1,7 @@
 // ================================================
-// A10 Runner — Enhanced Smart Coder Agent
-// Now parses styling hints + replaces old banner
-// Architect → Coder → Tester → Quality → Integrator
+// A10 Runner — Enhanced Smart Coder Agent + Multi-File Support
+// Handles Architect → Coder → Tester → Quality → Integrator
+// Supports both single-file and multi-file updates
 // ================================================
 
 import express from "express";
@@ -85,7 +85,7 @@ app.post("/run/architect", async (req, res) => {
     const payload = req.body || {};
     console.log("📦 Architect received:", JSON.stringify(payload, null, 2));
 
-    const required = ["task", "owner", "repo"];
+    const required = ["owner", "repo"];
     const missing = required.filter(k => !payload[k]);
     if (missing.length)
       return res.status(400).json({ ok: false, error: `Missing: ${missing.join(", ")}` });
@@ -109,7 +109,7 @@ app.post("/run/architect", async (req, res) => {
   }
 });
 
-// ---------- Smart Coder Agent (Enhanced HTML updater) ----------
+// ---------- Smart Coder Agent ----------
 app.post("/run/coder", async (req, res) => {
   try {
     const p = req.body?.payload || req.body || {};
@@ -117,15 +117,53 @@ app.post("/run/coder", async (req, res) => {
 
     const { owner, repo } = p;
     const branch = p.branch || "main";
-    const path = p.path || "index.html";
     const message = p.message || "Enhanced Smart Coder update";
     const task = p.task || "";
+    const files = p.files || [];
 
     if (!owner || !repo) {
       return res.status(400).json({ ok: false, reason: "Missing owner/repo" });
     }
 
-    // --- 1️⃣ Fetch existing index.html content ---
+    // --- MULTI-FILE MODE ---
+    if (Array.isArray(files) && files.length > 0) {
+      console.log(`📁 Detected multi-file commit (${files.length} files)`);
+
+      const results = [];
+      for (const file of files) {
+        const path = file.path || "index.html";
+        const content = file.content || "<html><body><h1>Empty File</h1></body></html>";
+        const commitMessage = file.message || message;
+
+        console.log(`📝 Committing ${path} ...`);
+        const result = await createOrUpdateFile({
+          owner,
+          repo,
+          path,
+          message: commitMessage,
+          contentUtf8: content,
+          branch,
+        });
+        results.push({ path, result });
+      }
+
+      const response = {
+        ok: true,
+        agent: "coder",
+        results,
+        mode: "multi-file",
+        next_step: "tester",
+        timestamp: new Date().toISOString(),
+      };
+
+      response.forwarded = await safeForward("/run/tester", p);
+      return res.json(response);
+    }
+
+    // --- SINGLE-FILE MODE (Enhanced Smart HTML update) ---
+    const path = p.path || "index.html";
+
+    // 1️⃣ Fetch existing HTML
     let existing = "";
     try {
       const { data } = await octokit.repos.getContent({ owner, repo, path, ref: branch });
@@ -134,7 +172,7 @@ app.post("/run/coder", async (req, res) => {
       existing = "<html><body><h1>Initial Page</h1></body></html>";
     }
 
-    // --- 2️⃣ Parse styling hints from task text ---
+    // 2️⃣ Parse style hints
     const style = {};
     const lower = task.toLowerCase();
     if (lower.includes("center")) style["text-align"] = "center";
@@ -143,20 +181,16 @@ app.post("/run/coder", async (req, res) => {
     if (lower.includes("gold")) style.color = "gold";
     if (lower.includes("green")) style.color = "green";
     if (lower.includes("red")) style.color = "red";
-    if (lower.includes("large") || lower.includes("bigger"))
-      style["font-size"] = "22px";
-    if (lower.includes("small"))
-      style["font-size"] = "14px";
+    if (lower.includes("large") || lower.includes("bigger")) style["font-size"] = "22px";
+    if (lower.includes("small")) style["font-size"] = "14px";
 
-    // --- 3️⃣ Convert to inline CSS string ---
     const styleString = Object.entries(style)
       .map(([k, v]) => `${k}:${v}`)
       .join(";");
 
-    // --- 4️⃣ Extract human message ---
-    // We try to isolate the quoted text after “says”
-    let textMatch = task.match(/says['"“](.*?)['"”]/i);
-    const innerText = textMatch ? textMatch[1] : task;
+    // 3️⃣ Extract message text
+    const match = task.match(/says['"“](.*?)['"”]/i);
+    const innerText = match ? match[1] : task;
 
     const addition = `
       <div class="a10-banner" style="${styleString};margin-top:20px;">
@@ -164,15 +198,15 @@ app.post("/run/coder", async (req, res) => {
       </div>
     `;
 
-    // --- 5️⃣ Remove previous a10-banner (replace old banners) ---
-    let cleanedHtml = existing.replace(/<div class="a10-banner".*?<\/div>/gs, "");
+    // 4️⃣ Replace existing banners
+    const cleaned = existing.replace(/<div class="a10-banner".*?<\/div>/gs, "");
 
-    // --- 6️⃣ Insert the new content before </body> if possible ---
-    const updatedHtml = cleanedHtml.includes("</body>")
-      ? cleanedHtml.replace("</body>", `${addition}\n</body>`)
-      : cleanedHtml + addition;
+    // 5️⃣ Inject before </body>
+    const updatedHtml = cleaned.includes("</body>")
+      ? cleaned.replace("</body>", `${addition}\n</body>`)
+      : cleaned + addition;
 
-    // --- 7️⃣ Commit updated HTML ---
+    // 6️⃣ Commit update
     const result = await createOrUpdateFile({
       owner,
       repo,
@@ -182,21 +216,21 @@ app.post("/run/coder", async (req, res) => {
       branch,
     });
 
-    console.log("✅ Enhanced Smart Coder commit successful:", result);
+    console.log("✅ Smart Coder commit successful:", result);
 
-    // --- 8️⃣ Auto-forward to Tester ---
     const response = {
       ok: true,
       agent: "coder",
       result,
+      mode: "single-file",
       next_step: "tester",
       timestamp: new Date().toISOString(),
     };
-    response.forwarded = await safeForward("/run/tester", p);
 
+    response.forwarded = await safeForward("/run/tester", p);
     res.json(response);
   } catch (err) {
-    console.error("💥 Enhanced Smart Coder error:", err);
+    console.error("💥 Smart Coder error:", err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -216,7 +250,6 @@ app.post("/run/tester", async (req, res) => {
     };
 
     response.forwarded = await safeForward("/run/quality", p);
-
     res.json(response);
   } catch (err) {
     console.error("💥 Tester error:", err);
@@ -239,7 +272,6 @@ app.post("/run/quality", async (req, res) => {
     };
 
     response.forwarded = await safeForward("/run/integrator", p);
-
     res.json(response);
   } catch (err) {
     console.error("💥 Quality error:", err);
@@ -261,7 +293,6 @@ app.post("/run/integrator", async (req, res) => {
     };
 
     response.forwarded = await safeForward("/run/supervisor", p);
-
     res.json(response);
   } catch (err) {
     console.error("💥 Integrator error:", err);
