@@ -1,3 +1,7 @@
+// ================================================
+// 🌟 A10 Runner — Backend with Formatted Timestamp
+// ================================================
+
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
@@ -10,13 +14,16 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 10000;
 
+// Initialize Octokit for GitHub access
 const octokit = new Octokit({
   auth: process.env.GITHUB_TOKEN,
 });
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// Helper: update GitHub file
+// ----------------------------------------------------
+// Helper: update a GitHub file directly
+// ----------------------------------------------------
 async function updateGitHubFile({ owner, repo, path, branch, message, content }) {
   const { data: file } = await octokit.repos.getContent({ owner, repo, path, ref: branch });
   const sha = file.sha;
@@ -34,14 +41,16 @@ async function updateGitHubFile({ owner, repo, path, branch, message, content })
   return { ok: true };
 }
 
-// ========== ROUTES ==========
+// ----------------------------------------------------
+// ✅ ROUTES
+// ----------------------------------------------------
 
-// ✅ Health check
+// Health check endpoint
 app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// ✅ Primary runner route
+// Primary orchestrator route
 app.post("/run", async (req, res) => {
   try {
     const { action, payload } = req.body;
@@ -49,6 +58,7 @@ app.post("/run", async (req, res) => {
     // 1️⃣ OPENAI CHAT
     if (action === "openai.chat") {
       const { model, messages } = payload;
+
       const response = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -57,19 +67,39 @@ app.post("/run", async (req, res) => {
         },
         body: JSON.stringify({ model, messages }),
       });
+
       const data = await response.json();
       return res.json({ ok: true, action, result: data });
     }
 
-    // 2️⃣ OPENAI EDIT + COMMIT
+    // 2️⃣ OPENAI EDIT AND COMMIT (with backend formatted timestamp)
     else if (action === "openai.edit-and-commit") {
       const { model, instruction, owner, repo, path, branch, message, commit } = payload;
 
-      // Get current file content
+      // Fetch the current file from GitHub
       const { data: file } = await octokit.repos.getContent({ owner, repo, path, ref: branch });
       const currentContent = Buffer.from(file.content, "base64").toString("utf8");
 
-      // Ask GPT to edit
+      // Generate backend timestamp (formatted)
+      const date = new Date();
+      const formattedTimestamp = date.toLocaleString("en-US", {
+        timeZone: "UTC",
+        year: "numeric",
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: true,
+      }) + " UTC";
+
+      // Append timestamp into GPT instruction
+      const updatedInstruction = `${instruction}\nInclude this deployment timestamp: ${formattedTimestamp}. 
+Return valid HTML only (no markdown, no code fences). 
+The HTML must include the motivational message and a <p> tag showing the timestamp below it. 
+Center the content with minimal inline CSS (font: Arial).`;
+
+      // Send request to OpenAI
       const aiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -82,11 +112,11 @@ app.post("/run", async (req, res) => {
             {
               role: "system",
               content:
-                "You are a precise code editor. Always output pure HTML only, never explanations.",
+                "You are a precise HTML generator. Always return valid, minimal HTML with a motivational quote and a formatted timestamp. No markdown.",
             },
             {
               role: "user",
-              content: `${instruction}\n\nCurrent file:\n${currentContent}`,
+              content: `${updatedInstruction}\n\nCurrent file:\n${currentContent}`,
             },
           ],
         }),
@@ -95,6 +125,7 @@ app.post("/run", async (req, res) => {
       const aiData = await aiResponse.json();
       const newHtml = aiData.choices?.[0]?.message?.content || currentContent;
 
+      // Commit new HTML to GitHub
       if (commit) {
         const { data: file } = await octokit.repos.getContent({ owner, repo, path, ref: branch });
         const sha = file.sha;
@@ -114,10 +145,11 @@ app.post("/run", async (req, res) => {
         ok: true,
         action,
         result: { ok: true, contentPreview: newHtml.slice(0, 200) },
+        timestamp: formattedTimestamp,
       });
     }
 
-    // 3️⃣ DIRECT COMMIT — no GPT involved
+    // 3️⃣ DIRECT COMMIT — write HTML directly (no OpenAI)
     else if (action === "direct.commit") {
       const { owner, repo, path, branch, message, commit, content } = payload;
 
@@ -133,7 +165,7 @@ app.post("/run", async (req, res) => {
       });
     }
 
-    // 🚫 Unknown action
+    // ❌ Unknown action
     else {
       return res.status(400).json({ ok: false, error: `Unknown action: ${action}` });
     }
@@ -143,4 +175,7 @@ app.post("/run", async (req, res) => {
   }
 });
 
+// ----------------------------------------------------
+// Start server
+// ----------------------------------------------------
 app.listen(PORT, () => console.log(`🚀 A10 Runner listening on port ${PORT}`));
