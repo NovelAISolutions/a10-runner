@@ -115,38 +115,70 @@ app.post("/run/architect", async (req, res) => {
   }
 });
 
-// ---------- Coder Agent ----------
+// ---------- Smart Coder Agent (HTML updater) ----------
 app.post("/run/coder", async (req, res) => {
   try {
     const p = req.body?.payload || req.body || {};
-    console.log("🧠 Coder received:", JSON.stringify(p, null, 2));
+    console.log("🧠 Coder received payload:", JSON.stringify(p, null, 2));
 
     const owner = p.owner;
     const repo = p.repo;
     const branch = p.branch || "main";
     const path = p.path || "index.html";
-    const message = p.message || "Automated commit";
-    const content =
-      p.content ||
-      `<html><body><h1>🧩 Updated by Coder Agent</h1><p>${new Date().toISOString()}</p></body></html>`;
+    const message = p.message || "AI Coder Agent update";
+    const task = p.task || "";
 
+    if (!owner || !repo) {
+      return res.status(400).json({ ok: false, reason: "Missing owner/repo" });
+    }
+
+    // --- 1️⃣ Fetch existing index.html content ---
+    let existing = "";
+    try {
+      const { data } = await octokit.repos.getContent({ owner, repo, path, ref: branch });
+      existing = Buffer.from(data.content, "base64").toString("utf8");
+    } catch (err) {
+      console.warn("⚠️ No existing file found, starting fresh.");
+      existing = "<html><body><h1>Initial Page</h1></body></html>";
+    }
+
+    // --- 2️⃣ Create a simple addition from the Architect task ---
+    const addition = `
+      <div style="text-align:center;font-weight:bold;color:gold;font-size:22px;margin-top:20px;">
+        ✨ ${task || "Update completed by Coder Agent"}
+      </div>
+    `;
+
+    // --- 3️⃣ Insert the new content before </body> if possible ---
+    const updatedHtml = existing.includes("</body>")
+      ? existing.replace("</body>", `${addition}\n</body>`)
+      : existing + addition;
+
+    // --- 4️⃣ Commit back to GitHub ---
     const result = await createOrUpdateFile({
       owner,
       repo,
       path,
       message,
-      contentUtf8: content,
+      contentUtf8: updatedHtml,
       branch,
     });
 
-    const response = { ok: true, agent: "coder", result, next_step: "tester" };
+    console.log("✅ Smart commit successful:", result);
 
-    // Auto-trigger Tester Agent
+    // --- 5️⃣ Auto-forward to Tester ---
+    const response = {
+      ok: true,
+      agent: "coder",
+      result,
+      next_step: "tester",
+      timestamp: new Date().toISOString(),
+    };
     response.forwarded = await safeForward("/run/tester", p);
 
     res.json(response);
   } catch (err) {
-    console.error("💥 Coder error:", err);
+    console.error("💥 Smart Coder error:", err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
