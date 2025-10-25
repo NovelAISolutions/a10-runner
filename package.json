@@ -1,15 +1,17 @@
 {
   "name": "a10-runner",
   "version": "1.0.0",
-  "description": "A10 AI Runner microservice",
+  "description": "A10 Runner for orchestrating AI tasks and direct commits",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
+    "@octokit/rest": "^20.0.2",
     "body-parser": "^1.20.2",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
     "node-fetch": "^3.3.2"
   }
 }
