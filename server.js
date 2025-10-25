@@ -37,8 +37,12 @@ async function getFileShaOrNull({ owner, repo, path, ref }) {
     const { data } = await octokit.repos.getContent({ owner, repo, path, ref });
     return Array.isArray(data) ? null : data.sha || null;
   } catch (err) {
-    if (err?.status === 404) return null;
-    throw err;
+    if (err?.status === 404) {
+      console.log(`ℹ️ File not found (creating new): ${path}`);
+      return null;
+    }
+    console.warn(`⚠️ getFileShaOrNull error for ${path}:`, err.message);
+    return null; // fail-safe fallback
   }
 }
 async function getTextFileOrNull({ owner, repo, path, ref }) {
