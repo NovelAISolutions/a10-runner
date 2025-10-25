@@ -4,14 +4,19 @@
 // ================================================
 
 import express from "express";
+import bodyParser from "body-parser";
 import dotenv from "dotenv";
 import { Octokit } from "@octokit/rest";
 
 dotenv.config();
 
 const app = express();
-app.use(express.json({ limit: "10mb" }));
-app.use(bodyParser.urlencoded({ extended: true })); // ✅ handles n8n fallbacks
+
+// ---------- Middleware ----------
+app.use(express.json({ limit: "10mb" })); // parse JSON
+app.use(bodyParser.urlencoded({ extended: true })); // ✅ handles n8n form-style payloads
+
+// ---------- Simple Request Logger ----------
 app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
@@ -20,7 +25,10 @@ app.use((req, _res, next) => {
 // ---------- Environment ----------
 const PORT = process.env.PORT || 10000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-if (!GITHUB_TOKEN) console.warn("⚠️  GITHUB_TOKEN missing — GitHub commits will fail.");
+
+if (!GITHUB_TOKEN) {
+  console.warn("⚠️  GITHUB_TOKEN missing — GitHub commits will fail.");
+}
 
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
@@ -39,6 +47,7 @@ async function createOrUpdateFile({ owner, repo, path, message, contentUtf8, bra
   const contentB64 = Buffer.from(contentUtf8, "utf8").toString("base64");
   const ref = branch || "main";
   const sha = await getFileShaOrNull({ owner, repo, path, ref });
+
   await octokit.repos.createOrUpdateFileContents({
     owner,
     repo,
@@ -48,6 +57,7 @@ async function createOrUpdateFile({ owner, repo, path, message, contentUtf8, bra
     branch: ref,
     ...(sha ? { sha } : {}),
   });
+
   return { ok: true, branch: ref, created: !sha, updated: !!sha };
 }
 
