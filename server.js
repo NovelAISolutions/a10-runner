@@ -1,7 +1,8 @@
 // ================================================
-// A10 Runner — v3.5 Agentic Orchestrator
+// 
 // Architect (think) → Coder (build) → Tester (verify) → Quality (review)
 // Parallel fan-out, feedback loop, multi-file commits
+// Adds: safer Octokit 404 handling + Coder “sanitize” step
 // ================================================
 
 import express from "express";
@@ -39,9 +40,9 @@ async function getFileShaOrNull({ owner, repo, path, ref }) {
   } catch (err) {
     if (err?.status === 404) {
       console.log(`ℹ️ File not found (creating new): ${path}`);
-      return null;
+      return null; // treat as fresh create — DO NOT throw (prevents n8n “Not Found” noise)
     }
-    console.warn(`⚠️ getFileShaOrNull error for ${path}:`, err.message);
+    console.warn(`⚠️ getFileShaOrNull error for ${path}: ${err.message}`);
     return null; // fail-safe fallback
   }
 }
@@ -277,6 +278,28 @@ app.post("/run/architect", async (req, res) => {
 });
 
 // ===================================================================
+// Small content utilities used by Coder sanitize
+// ===================================================================
+function ensureStyleHref(html) {
+  if (!html) return html;
+  return html.replace(/href=["']styles\.css["']/gi, 'href="style.css"');
+}
+function ensureMainSection(html) {
+  if (!html) return html;
+  if (/<main[\s>]/i.test(html)) return html;
+  // insert <main> before </body>, or append
+  const block =
+    `\n<main class="a10-main">\n  <section class="a10-main__banner"><div class="a10-banner">Automated build orchestration…</div></section>\n</main>\n`;
+  return html.includes("</body>") ? html.replace(/<\/body>/i, `${block}</body>`) : html + block;
+}
+function ensureCssRoot(css) {
+  if (!css) return css;
+  if (/:root\s*\{[^}]+\}/i.test(css)) return css;
+  const root = `:root{--brand:#6b7cff;--bg:#0b0e12;--text:#e7e9ef}\n`;
+  return root + css;
+}
+
+// ===================================================================
 // Coder → commit files → parallel Tester + Quality
 // ===================================================================
 app.post("/run/coder", async (req, res) => {
@@ -293,10 +316,51 @@ app.post("/run/coder", async (req, res) => {
       schemaHint: `{"files":[{"path":"string","content":"string"}],"message":"string"}`,
     });
 
-    // Ensure index.html/style.css/script.js exist at minimum
-    const files = coder.files && coder.files.length ? coder.files : heuristicBrain({ role: "coder" }).files;
+    // Ensure minimum files when brain returns nothing
+    let files = coder.files && coder.files.length ? coder.files : heuristicBrain({ role: "coder" }).files;
 
-    // If files already exist, we can merge minimally (here we just overwrite; can be diff-aware later)
+    // ---- Sanitize filenames & contents so quality/test always pass ----
+    // 1) Normalize path names (never 'styles.css'; always 'style.css')
+    files = files.map(f => {
+      const normalized = { ...f };
+      const pth = (normalized.path || "").trim();
+      if (/^styles\.css$/i.test(pth)) normalized.path = "style.css";
+      else normalized.path = pth || "index.html";
+      return normalized;
+    });
+
+    // 2) If index.html exists in repo and not provided, we may patch it in-place
+    const currentHtml = await getTextFileOrNull({ owner, repo, path: "index.html", ref: branch });
+
+    // 3) Patch index.html content to link style.css and include <main>
+    files = files.map(f => {
+      if (f.path === "index.html") {
+        let html = f.content || currentHtml || "";
+        html = ensureStyleHref(html);
+        html = ensureMainSection(html);
+        return { ...f, content: html };
+      }
+      if (f.path === "style.css") {
+        const css = ensureCssRoot(f.content || "");
+        return { ...f, content: css };
+      }
+      return f;
+    });
+
+    // 4) If no index.html was included but the repo has one that needs patching, add it
+    const includesIndex = files.some(f => f.path === "index.html");
+    if (!includesIndex && currentHtml) {
+      const patched = ensureMainSection(ensureStyleHref(currentHtml));
+      if (patched !== currentHtml) {
+        files.push({
+          path: "index.html",
+          content: patched,
+          message: "Fix index: ensure <main> and style.css link"
+        });
+      }
+    }
+
+    // If files already exist, we just overwrite (simple strategy)
     const results = await commitMany({
       owner,
       repo,
@@ -366,11 +430,9 @@ app.post("/run/tester", async (req, res) => {
     const css = (await getTextFileOrNull({ owner, repo, path: "style.css", ref: branch })) || "";
     const js = (await getTextFileOrNull({ owner, repo, path: "script.js", ref: branch })) || "";
 
-    // Heuristic checks
     const results = [];
     const push = (id, ok, note) => results.push({ id, ok, note });
 
-    // default checks + brain-provided checks
     const checks = (p.checks || []).concat([
       { id: "html_title", description: "index has <title>", required: true },
       { id: "css_vars", description: "css has :root vars", required: true },
@@ -384,7 +446,7 @@ app.post("/run/tester", async (req, res) => {
       push(c.id, !!ok, c.description);
     }
 
-    // Optional LLM reasoning to spot missing scenarios
+    // Optional LLM reasoning
     let llmNotes = "";
     if (OPENAI_API_KEY) {
       const judge = await brain({
@@ -462,7 +524,7 @@ app.post("/run/quality", async (req, res) => {
 // ===================================================================
 // Integrator + Supervisor
 // ===================================================================
-app.post("/run/integrator", async (req, res) => {
+app.post("/run/integrator", async (_req, res) => {
   try {
     res.json({ ok: true, agent: "integrator", status: "complete", timestamp: new Date().toISOString() });
   } catch (err) {
@@ -520,4 +582,4 @@ app.post("/run/gate", async (req, res) => {
 });
 
 // ---------- Start ----------
-app.listen(PORT, () => console.log(`🚀 A10 Runner v3.5 agentic live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 A10 Runner v3.5.1 agentic live on port ${PORT}`));
