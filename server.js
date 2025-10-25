@@ -1,5 +1,5 @@
 // ================================================
-// A10 Runner — v3.5.2 Agentic Orchestrator
+// A10 Runner — v3.5.3 Agentic Orchestrator
 // Architect (think) → Coder (build) → Tester (verify) → Quality (review)
 // Parallel fan-out, feedback loop, safe commits, automatic CSS cleanup
 // ================================================
@@ -31,7 +31,12 @@ if (!OPENAI_API_KEY) console.warn("ℹ️  OPENAI_API_KEY not set — using heur
 
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
-// ---------- Core GitHub Helpers (hoisted globally) ----------
+// ---------- Utilities ----------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const ensureString = (v) =>
+  typeof v === "string" ? v : v == null ? "" : JSON.stringify(v, null, 2);
+
+// ---------- Core GitHub Helpers ----------
 async function getTextFileOrNull({ owner, repo, path, ref }) {
   try {
     const { data } = await octokit.repos.getContent({ owner, repo, path, ref });
@@ -80,10 +85,8 @@ async function deleteFileIfExists({ owner, repo, path, branch }) {
 }
 
 // ---------- Commit Helpers ----------
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 async function commitWithRetry({ owner, repo, path, message, contentUtf8, branch }, tries = 3) {
-  const contentB64 = Buffer.from(contentUtf8, "utf8").toString("base64");
+  const contentB64 = Buffer.from(ensureString(contentUtf8), "utf8").toString("base64");
   const ref = branch || "main";
   for (let i = 0; i < tries; i++) {
     try {
@@ -117,7 +120,7 @@ async function commitMany({ owner, repo, files, message, branch }) {
       repo,
       path: f.path,
       message: f.message || message,
-      contentUtf8: f.content,
+      contentUtf8: ensureString(f.content),
       branch,
     });
     results.push(r);
@@ -129,6 +132,7 @@ async function commitMany({ owner, repo, files, message, branch }) {
 
 // ---------- Forward Helper ----------
 async function forward(path, payload) {
+  // Accept either {payload: ...} or raw object and wrap consistently
   const url = `${SELF_URL}${path}`;
   const body = JSON.stringify(payload?.payload ? payload : { payload });
   const r = await fetch(url, {
@@ -202,22 +206,24 @@ function heuristicBrain({ role, input }) {
       files: [
         {
           path: "index.html",
-          content: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>A10 Sandbox</title><link rel="stylesheet" href="style.css"></head><body><header class="hero"><h1>Welcome to A10</h1></header><main id="app"></main><script src="script.js"></script></body></html>`,
+          content:
+            `<!doctype html><html><head><meta charset="utf-8">` +
+            `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+            `<title>A10 Sandbox</title><link rel="stylesheet" href="style.css"></head>` +
+            `<body><header class="hero"><h1>Welcome to A10</h1></header>` +
+            `<main id="app"></main><script src="script.js"></script></body></html>`,
         },
         {
           path: "style.css",
-          content: `:root{--brand:#6b7cff;--bg:#0b0e12;--text:#e7e9ef}body{background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif;margin:0;padding:0}`,
+          content: `:root{--brand:#6b7cff;--bg:#0b0e12;--text:#e7e9ef}
+body{background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif;margin:0;padding:0}`,
         },
-        {
-          path: "script.js",
-          content: `console.log("A10 sandbox ready");`,
-        },
+        { path: "script.js", content: `console.log("A10 sandbox ready");` },
       ],
       message: "Coder heuristic scaffold",
     };
   }
-  if (role === "tester")
-    return { checks: [{ id: "html_title" }, { id: "css_vars" }] };
+  if (role === "tester") return { checks: [{ id: "html_title" }, { id: "css_vars" }] };
   if (role === "quality") return { rules: ["No inline <style>", "Has <main>"] };
   return {};
 }
@@ -234,8 +240,7 @@ app.post("/run/architect", async (req, res) => {
   try {
     const payload = req.body?.payload || req.body || {};
     const { owner, repo } = payload;
-    if (!owner || !repo)
-      return res.status(400).json({ ok: false, error: "Missing owner/repo" });
+    if (!owner || !repo) return res.status(400).json({ ok: false, error: "Missing owner/repo" });
 
     const arch = await brain({
       role: "architect",
@@ -269,34 +274,61 @@ app.post("/run/coder", async (req, res) => {
   try {
     const p = req.body?.payload || req.body || {};
     const { owner, repo, branch = "main" } = p;
-    if (!owner || !repo)
-      return res.status(400).json({ ok: false, error: "Missing owner/repo" });
+    if (!owner || !repo) return res.status(400).json({ ok: false, error: "Missing owner/repo" });
 
-    const coder = await brain({
-      role: "coder",
-      instruction: "Generate files for sandbox",
-      input: { coder_plan: p.coder_plan, feedback: p.feedback },
-    });
-    const files = coder.files?.length
-      ? coder.files
-      : heuristicBrain({ role: "coder" }).files;
+    // Either produce files from the "brain" or use verification task override
+    let files;
+    if (p.task) {
+      // Deterministic verification content so you can assert GitHub updates
+      files = [
+        {
+          path: "index.html",
+          content: `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A10 Sandbox</title>
+<link rel="stylesheet" href="style.css">
+</head><body>
+<header class="hero"><h1>Welcome to A10</h1></header>
+<main id="app"></main>
+<footer data-a10="coder">Coder verification test ✅ (${new Date().toISOString()})</footer>
+<script src="script.js"></script>
+</body></html>`,
+        },
+        {
+          path: "style.css",
+          content: `/* a10 coder verification */
+:root{--brand:#6b7cff;--bg:#0b0e12;--text:#e7e9ef}
+body{background:#cfe8ff;color:var(--text);font-family:Inter,system-ui,sans-serif;margin:0;padding:0}
+.hero{padding:32px;text-align:center}`,
+        },
+        {
+          path: "script.js",
+          content: `console.log("A10 coder verification executed at ${new Date().toISOString()}");`,
+        },
+      ];
+    } else {
+      const coder = await brain({
+        role: "coder",
+        instruction: "Generate files for sandbox",
+        input: { coder_plan: p.coder_plan, feedback: p.feedback },
+      });
+      files = coder.files?.length ? coder.files : heuristicBrain({ role: "coder" }).files;
+    }
 
-    // CSS cleanup
-    const cssCleanup = await deleteFileIfExists({
-      owner,
-      repo,
-      path: "styles.css",
-      branch,
-    });
+    // CSS cleanup for legacy filename
+    const cssCleanup = await deleteFileIfExists({ owner, repo, path: "styles.css", branch });
 
+    // Commit
     const { results, errors } = await commitMany({
       owner,
       repo,
-      files,
-      message: coder.message || "Coder update",
+      files: files.map((f) => ({ ...f, content: ensureString(f.content) })),
+      message: p.message || "Coder update",
       branch,
     });
 
+    // Prepare downstream checks
     const [testerPlan, qualityPlan] = await Promise.all([
       brain({ role: "tester", input: p.tester_plan || [] }),
       brain({ role: "quality", input: p.quality_rules || [] }),
@@ -329,6 +361,7 @@ app.post("/run/coder", async (req, res) => {
       quality: qualityResp,
     });
   } catch (err) {
+    console.error("💥 Coder error:", err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -341,9 +374,9 @@ app.post("/run/tester", async (req, res) => {
     const p = req.body?.payload || req.body || {};
     const { owner, repo, branch = "main" } = p;
     const html = (await getTextFileOrNull({ owner, repo, path: "index.html", ref: branch })) || "";
-    const css = (await getTextFileOrNull({ owner, repo, path: "style.css", ref: branch })) || "";
+    const css  = (await getTextFileOrNull({ owner, repo, path: "style.css", ref: branch })) || "";
 
-    const ok = /<title>/i.test(html) && /:root\s*\{[^}]+\}/i.test(css);
+    const ok = /<title>[^<]+<\/title>/i.test(html) && /:root\s*\{[^}]+\}/i.test(css);
     res.json({ ok, agent: "tester", result: ok ? "passed" : "failed" });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -371,6 +404,7 @@ app.post("/run/quality", async (req, res) => {
 app.post("/run/integrator", async (_req, res) =>
   res.json({ ok: true, agent: "integrator", status: "complete" })
 );
+
 app.post("/run/supervisor", async (_req, res) =>
   res.json({ ok: true, agent: "supervisor", status: "done" })
 );
@@ -378,11 +412,11 @@ app.post("/run/supervisor", async (_req, res) =>
 app.post("/run/gate", async (req, res) => {
   const p = req.body?.payload || req.body || {};
   const { tester, quality, orchestration } = p;
-  if (!orchestration)
-    return res.status(400).json({ ok: false, error: "Missing orchestration" });
+  if (!orchestration) return res.status(400).json({ ok: false, error: "Missing orchestration" });
 
-  const testerFail = tester?.ok === false;
-  const qualityFail = quality?.ok === false;
+  const testerFail  = tester?.ok === false || tester?.result === "failed";
+  const qualityFail = quality?.ok === false || quality?.status === "fail";
+
   if (testerFail || qualityFail) {
     const next = { ...orchestration, retries: (orchestration.retries || 0) + 1 };
     const coderResp = await forward("/run/coder", next);
@@ -390,9 +424,9 @@ app.post("/run/gate", async (req, res) => {
   }
 
   const integ = await forward("/run/integrator", orchestration);
-  const sv = await forward("/run/supervisor", orchestration);
+  const sv    = await forward("/run/supervisor", orchestration);
   res.json({ ok: true, status: "proceed", integrator: integ, supervisor: sv });
 });
 
 // ---------- Start ----------
-app.listen(PORT, () => console.log(`🚀 A10 Runner v3.5.2 agentic live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 A10 Runner v3.5.3 agentic live on port ${PORT}`));
