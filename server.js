@@ -45,60 +45,64 @@ const normalize = (body) => {
   };
 };
 
-// ---------- GitHub commit with fallback ----------
+// ---------- GitHub commit with smarter fallback + logging ----------
 async function commitAtomic({ owner, repo, path, message, contentUtf8, branch }, attempt = 1) {
   const contentB64 = Buffer.from(ensureString(contentUtf8), "utf8").toString("base64");
+  const targetBranch = branch || "main";
   try {
-    const { data } = await octokit.repos.get({ owner, repo });
-    const defaultBranch = data.default_branch || branch || "main";
-    const sha = await getFileShaOrNull({ owner, repo, path, ref: defaultBranch });
+    // ✅ preflight: confirm repo and branch exist
+    await octokit.repos.get({ owner, repo });
+  } catch (e) {
+    diag("github", "error", "Preflight repo access failed", { owner, repo, error: e.message });
+    return { ok: false, path, error: "repo_not_found_or_no_access" };
+  }
+
+  try {
+    const sha = await getFileShaOrNull({ owner, repo, path, ref: targetBranch });
     const resp = await octokit.repos.createOrUpdateFileContents({
       owner,
       repo,
       path,
       message,
       content: contentB64,
-      branch: defaultBranch,
+      branch: targetBranch,
       ...(sha ? { sha } : {}),
     });
     return { ok: true, path, status: resp.status, github_mode: "normal" };
   } catch (err) {
-    if (err?.status === 404 && attempt <= 2) {
-      // fallback to direct API
-      const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
+    if (err.status === 404 || err.status === 422) {
       diag("github", "warn", "Fallback commit path", { path, attempt });
+      const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
+      const body = {
+        message,
+        content: contentB64,
+        branch: targetBranch,
+        committer: { name: "A10 Runner Bot", email: "bot@a10runner.local" },
+      };
       const resp = await fetch(url, {
         method: "PUT",
         headers: {
           Authorization: `Bearer ${GITHUB_TOKEN}`,
           "Content-Type": "application/json",
+          Accept: "application/vnd.github+json",
         },
-        body: JSON.stringify({ message, content: contentB64, branch }),
+        body: JSON.stringify(body),
       });
-      const ok = resp.ok;
-      return { ok, path, status: resp.status, github_mode: "fallback" };
+      const text = await resp.text();
+      let json;
+      try { json = JSON.parse(text); } catch { json = { raw: text }; }
+      if (!resp.ok) {
+        diag("github", "error", "Fallback PUT failed", { path, status: resp.status, body: json });
+        return { ok: false, path, error: json.message || "fallback_failed", status: resp.status };
+      }
+      diag("github", "info", "Fallback PUT success", { path, status: resp.status });
+      return { ok: true, path, github_mode: "fallback", status: resp.status };
     }
-    diag("github", "error", `Commit failed for ${path}`, { error: err.message });
+    diag("github", "error", "Commit failed", { path, error: err.message });
     return { ok: false, path, error: err.message };
   }
 }
-async function getFileShaOrNull({ owner, repo, path, ref }) {
-  try {
-    const { data } = await octokit.repos.getContent({ owner, repo, path, ref });
-    return Array.isArray(data) ? null : data.sha || null;
-  } catch {
-    return null;
-  }
-}
-async function getTextFileOrNull({ owner, repo, path, ref }) {
-  try {
-    const { data } = await octokit.repos.getContent({ owner, repo, path, ref });
-    if (Array.isArray(data)) return null;
-    return Buffer.from(data.content, "base64").toString("utf8");
-  } catch {
-    return null;
-  }
-}
+
 async function commitSequential({ owner, repo, branch, files }) {
   const results = [];
   for (const f of files) {
